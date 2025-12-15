@@ -6,60 +6,76 @@ import os
 app = FastAPI()
 cl = Client()
 
-# --- ENVIRONMENT VARIABLES ---
-# Vercel Dashboard me set karna hoga
+# --- ENV VARIABLES ---
 MONGO_URL = os.getenv("MONGO_URL")
 USERNAME = os.getenv("INSTA_USER")
 PASSWORD = os.getenv("INSTA_PASS")
+SESSION_ID = os.getenv("INSTA_SESSIONID")  # <-- Ye naya hai
 
 # --- DB CONNECTION ---
 try:
     mongo_client = MongoClient(MONGO_URL)
     db = mongo_client["InstaStreamBot"]
     collection = db["session"]
-    print("✅ MongoDB Connected")
 except Exception as e:
     print(f"❌ DB Error: {e}")
 
-# Global variable to check login status inside serverless function
 is_logged_in = False
 
 def ensure_login():
-    """Serverless function me har request pe check karega ki login hai ya nahi"""
     global is_logged_in
     if is_logged_in:
         return True
 
     print("🔄 Connecting to Instagram...")
-    
-    # 1. MongoDB se Session dhoondo
+
+    # --- METHOD 1: Direct Session ID from Vercel Env (BEST) ---
+    if SESSION_ID:
+        try:
+            print(f"🍪 Using Session ID from Env...")
+            cl.login_by_sessionid(SESSION_ID)
+            is_logged_in = True
+            print("✅ Login Successful via Session ID!")
+            
+            # Future ke liye DB mein bhi save kar dete hain
+            try:
+                collection.update_one(
+                    {"_id": "insta_session"},
+                    {"$set": {"settings": cl.dump_settings()}},
+                    upsert=True
+                )
+            except:
+                pass
+            return True
+        except Exception as e:
+            print(f"⚠️ Session ID Env failed: {e}")
+
+    # --- METHOD 2: Check MongoDB ---
     session_data = collection.find_one({"_id": "insta_session"})
-    
     if session_data:
         try:
             settings = session_data.get("settings")
             cl.load_settings(settings)
             cl.login(USERNAME, PASSWORD)
             is_logged_in = True
-            print("✅ Logged in via Session")
+            print("✅ Logged in via DB Session")
             return True
         except Exception as e:
-            print(f"⚠️ Session expired: {e}")
+            print(f"⚠️ DB Session expired: {e}")
 
-    # 2. Fresh Login
+    # --- METHOD 3: Password Login (Last Option) ---
     try:
+        print("🔑 Trying Password Login...")
         cl.login(USERNAME, PASSWORD)
-        new_settings = cl.dump_settings()
         collection.update_one(
             {"_id": "insta_session"},
-            {"$set": {"settings": new_settings}},
+            {"$set": {"settings": cl.dump_settings()}},
             upsert=True
         )
         is_logged_in = True
-        print("✅ New Login Successful & Saved")
         return True
     except Exception as e:
-        print(f"❌ Login Failed: {e}")
+        print(f"❌ All Login Methods Failed: {e}")
         return False
 
 @app.get("/")
@@ -68,9 +84,8 @@ def home():
 
 @app.get("/get_reels")
 def get_reels():
-    # Login check karega
     if not ensure_login():
-        return {"status": "error", "message": "Login Failed"}
+        return {"status": "error", "message": "Login Failed. Check Vercel Logs."}
 
     try:
         reels = cl.clips_suggested(amount=5)
@@ -84,4 +99,4 @@ def get_reels():
         return {"status": "success", "data": data}
     except Exception as e:
         return {"status": "error", "message": str(e)}
-      
+        
